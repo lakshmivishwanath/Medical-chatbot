@@ -10,4 +10,5 @@ A simple web-based chatbot that collects medical information and stores it in an
 ## How to Run
 pip install flask  
 python app.py  
-Open http://127.0.0.1:5000
+Open  http://127.0.0.1:5000
+
