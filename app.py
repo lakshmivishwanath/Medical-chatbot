@@ -1,174 +1,185 @@
 from flask import Flask, request, jsonify
 import sqlite3
+import spacy
+import re
 
 app = Flask(__name__)
 
-# ===== DATABASE SETUP =====
+# ================= NLP (LIGHT & FAST) =================
+nlp = spacy.load(
+    "en_core_web_sm",
+    disable=["parser", "tagger", "lemmatizer"]
+)
+
+# ================= DATABASE =================
 conn = sqlite3.connect("friend_database.db", check_same_thread=False)
 cursor = conn.cursor()
+
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS patients (
+CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
     age INTEGER,
-    blood_group TEXT,
-    weight REAL,
-    symptoms TEXT
+    symptoms TEXT,
+    possible_condition TEXT,
+    precautions TEXT
 )
 """)
 conn.commit()
 
-# ===== HOME PAGE / CHATBOT =====
-@app.route("/")
-def home():
+# ================= RULES =================
+
+SYMPTOMS_LIST = ["fever", "headache", "cough", "cold", "sore throat", "body pain"]
+
+CONDITION_RULES = {
+    ("fever", "headache"): "Possible viral infection",
+    ("fever", "cough"): "Possible flu-like illness",
+    ("cold", "cough"): "Possible common cold"
+}
+
+PRECAUTIONS = {
+    "fever": [
+        "Drink plenty of fluids",
+        "Take adequate rest",
+        "Monitor body temperature"
+    ],
+    "headache": [
+        "Reduce screen time",
+        "Rest in a quiet room",
+        "Stay hydrated"
+    ],
+    "cough": [
+        "Drink warm fluids",
+        "Avoid cold drinks",
+        "Cover mouth while coughing"
+    ],
+    "cold": [
+        "Keep yourself warm",
+        "Avoid cold food",
+        "Use warm water for drinking"
+    ]
+}
+
+# ================= NLP EXTRACTION =================
+def extract_details(text):
+    doc = nlp(text)
+
+    name = None
+    age = None
+    found_symptoms = []
+
+    # Name
+    for ent in doc.ents:
+        if ent.label_ == "PERSON":
+            name = ent.text
+
+    # Age
+    age_match = re.search(r'(\d{1,3})\s*(years|year|yrs)?', text.lower())
+    if age_match:
+        age = int(age_match.group(1))
+
+    # Symptoms
+    text_lower = text.lower()
+    for s in SYMPTOMS_LIST:
+        if s in text_lower:
+            found_symptoms.append(s)
+
+    return name, age, found_symptoms
+
+# ================= CONDITION LOGIC =================
+def infer_condition(symptoms):
+    for rule, condition in CONDITION_RULES.items():
+        if all(r in symptoms for r in rule):
+            return condition
+    if symptoms:
+        return "General health issue (needs medical evaluation)"
+    return "Not enough information"
+
+# ================= PRECAUTION LOGIC =================
+def infer_precautions(symptoms):
+    tips = []
+    for s in symptoms:
+        tips.extend(PRECAUTIONS.get(s, []))
+    if not tips:
+        tips.append("Please consult a doctor for proper evaluation")
+    return list(set(tips))
+
+# ================= CHAT =================
+@app.route("/", methods=["GET", "POST"])
+def chat():
+    if request.method == "POST":
+        user_text = request.json.get("message", "")
+
+        name, age, symptoms = extract_details(user_text)
+        condition = infer_condition(symptoms)
+        precautions = infer_precautions(symptoms)
+
+        report_text = f"""
+Health Summary
+--------------
+Name: {name if name else "Not provided"}
+Age: {age if age else "Not provided"}
+Symptoms: {", ".join(symptoms) if symptoms else "Not clearly mentioned"}
+
+Possible Condition:
+{condition}
+
+General Precautions:
+- """ + "\n- ".join(precautions) + """
+
+⚠️ Disclaimer:
+This chatbot provides general health information only.
+It is NOT a medical diagnosis.
+Please consult a healthcare professional if symptoms persist.
+"""
+
+        # Save to DB
+        cursor.execute(
+            "INSERT INTO reports (name, age, symptoms, possible_condition, precautions) VALUES (?,?,?,?,?)",
+            (
+                name,
+                age,
+                ", ".join(symptoms),
+                condition,
+                "; ".join(precautions)
+            )
+        )
+        conn.commit()
+
+        return jsonify({"reply": report_text})
+
+    # ---------- SIMPLE UI ----------
     return """
 <!DOCTYPE html>
 <html>
 <head>
-<title>Medical Intake Chatbot</title>
-<style>
-body {
-    font-family: 'Arial', sans-serif;
-    background: linear-gradient(120deg, #ff9a9e, #fad0c4);
-    margin:0;
-    padding:0;
-}
-.chatbox {
-    width:450px;
-    margin:50px auto;
-    background:#ffffff;
-    padding:25px;
-    border-radius:20px;
-    box-shadow:0 10px 30px rgba(0,0,0,0.2);
-    animation: fadeIn 1s ease-in;
-}
-h2 {
-    text-align:center;
-    color:#ff6f61;
-    font-weight:bold;
-}
-#chat {
-    height:280px;
-    overflow-y:auto;
-    border:2px solid #ff6f61;
-    padding:10px;
-    border-radius:10px;
-    background:#fff7f3;
-    margin-bottom:10px;
-}
-.user {
-    color:#3d84a8;
-    font-weight:bold;
-}
-.bot {
-    color:#ffb347;
-    font-weight:bold;
-}
-input {
-    width:75%;
-    padding:12px;
-    border-radius:10px;
-    border:2px solid #ff6f61;
-    background:#fff7f3;
-    color:#333;
-    font-weight:bold;
-}
-input::placeholder {
-    color:#999;
-}
-button {
-    padding:12px 18px;
-    border:none;
-    background:#ff6f61;
-    color:white;
-    border-radius:10px;
-    cursor:pointer;
-    font-weight:bold;
-    transition:0.3s;
-}
-button:hover {
-    background:#ff3d2e;
-}
-.view {
-    margin-top:15px;
-    text-align:center;
-}
-a {
-    text-decoration:none;
-    color:#3d84a8;
-    font-weight:bold;
-}
-a:hover {
-    color:#1c3f5a;
-}
-@keyframes fadeIn {
-    0% {opacity:0; transform: translateY(-20px);}
-    100% {opacity:1; transform: translateY(0);}
-}
-</style>
+<title>NLP Medical Chatbot</title>
 </head>
 <body>
-<div class="chatbox">
-<h2>Medical Intake Chatbot</h2>
+<h2>NLP Medical Chatbot</h2>
 <div id="chat"></div>
-<input id="input" placeholder="Type here...">
+<input id="input" placeholder="Describe your health problem..." style="width:70%;">
 <button onclick="send()">Send</button>
-<div class="view">
-    <a href="/patients"> View Saved Data</a>
-</div>
-</div>
+<br><br>
+<a href="/reports">View Saved Reports</a>
 
 <script>
-let step = 0;
-let data = {};
-const questions = [
-    "Hello! What is your name?",
-    "How old are you?",
-    "What is your Bloodgroup?",
-    "What is your Weight (kg)?",
-    "Please describe your symptoms"
-];
-
-document.getElementById("chat").innerHTML += "<p class='bot'>Bot: "+questions[0]+"</p>";
-
 function send(){
-    let input = document.getElementById("input").value;
-    if(!input) return;
+    let msg = document.getElementById("input").value;
+    if(!msg) return;
 
-    document.getElementById("chat").innerHTML += "<p class='user'>You: "+input+"</p>";
+    document.getElementById("chat").innerHTML += "<p><b>You:</b> "+msg+"</p>";
 
-    if(step===0) data.name=input;
-    if(step===1){
-        if(isNaN(input)){
-            document.getElementById("chat").innerHTML += "<p class='bot'>Bot: Age must be numeric</p>";
-            return;
-        }
-        data.age=input;
-    }
-    if(step===2) data.blood_group=input;
-    if(step===3){
-        if(isNaN(input)){
-            document.getElementById("chat").innerHTML += "<p class='bot'>Bot: Weight must be numeric</p>";
-            return;
-        }
-        data.weight=input;
-    }
-    if(step===4){
-        data.symptoms=input;
-        fetch("/save",{
-            method:"POST",
-            headers:{"Content-Type":"application/json"},
-            body:JSON.stringify(data)
-        })
-        .then(r=>r.json())
-        .then(res=>{
-            document.getElementById("chat").innerHTML += "<p class='bot'>Bot: "+res.message+"</p>";
-        });
-        return;
-    }
+    fetch("/",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({message:msg})
+    })
+    .then(res=>res.json())
+    .then(data=>{
+        document.getElementById("chat").innerHTML += "<pre><b>Bot:</b> "+data.reply+"</pre>";
+    });
 
-    step++;
-    document.getElementById("chat").innerHTML += "<p class='bot'>Bot: "+questions[step]+"</p>";
     document.getElementById("input").value="";
 }
 </script>
@@ -176,56 +187,40 @@ function send(){
 </html>
 """
 
-# ===== SAVE PATIENT DATA =====
-@app.route("/save", methods=["POST"])
-def save():
-    d = request.json
-    cursor.execute(
-        "INSERT INTO patients (name, age, blood_group, weight, symptoms) VALUES (?,?,?,?,?)",
-        (d["name"], d["age"], d["blood_group"], d["weight"], d["symptoms"])
-    )
-    conn.commit()
-    return jsonify({"message":"Your medical details have been saved successfully! Thank you!"})
-
-# ===== VIEW PATIENT DATA =====
-@app.route("/patients")
-def patients():
-    cursor.execute("SELECT * FROM patients")
+# ================= VIEW SAVED REPORTS =================
+@app.route("/reports")
+def view_reports():
+    cursor.execute("SELECT * FROM reports")
     rows = cursor.fetchall()
 
     html = """
-    <html>
-    <head>
-    <title>Saved Patients</title>
-    <style>
-    body{font-family:Arial, sans-serif; background: linear-gradient(120deg, #ff9a9e, #fecfef); color:#333;}
-    table{border-collapse:collapse;width:90%;margin:30px auto;background:#fff9f5; border-radius:10px; overflow:hidden; box-shadow:0 5px 20px rgba(0,0,0,0.15);}
-    th,td{padding:12px;border:1px solid #ff6f61;text-align:center;}
-    th{background:#ff6f61;color:white;}
-    h2{text-align:center; color:#ff3d2e; font-weight:bold;}
-    a{display:block; text-align:center; margin-top:20px; text-decoration:none; color:#3d84a8; font-weight:bold;}
-    a:hover{color:#1c3f5a;}
-    </style>
-    </head>
-    <body>
-    <h2>📋 Stored Patient Records</h2>
-    <table>
+    <h2>Saved Medical Reports</h2>
+    <table border="1" cellpadding="8">
     <tr>
-    <th>ID</th><th>Name</th><th>Age</th><th>Blood Group</th>
-    <th>Weight</th><th>Symptoms</th>
+        <th>ID</th>
+        <th>Name</th>
+        <th>Age</th>
+        <th>Symptoms</th>
+        <th>Possible Condition</th>
+        <th>Precautions</th>
     </tr>
     """
 
     for r in rows:
-        html += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td><td>{r[4]}</td><td>{r[5]}</td></tr>"
+        html += f"""
+        <tr>
+            <td>{r[0]}</td>
+            <td>{r[1]}</td>
+            <td>{r[2]}</td>
+            <td>{r[3]}</td>
+            <td>{r[4]}</td>
+            <td>{r[5]}</td>
+        </tr>
+        """
 
-    html += """
-    </table>
-    <a href="/">← Back to Chatbot</a>
-    </body>
-    </html>
-    """
+    html += "</table><br><a href='/'>Back to Chatbot</a>"
     return html
 
+# ================= RUN =================
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)
